@@ -1,0 +1,14 @@
+**data/
+**checkpoint/
+*__pycache__*
+*mig*
+**ttt*/
+**/*mig*/
+**log/**
+**/log/**
+*.txt
+*.idea/
+**/test/**
+core.*
+*.ipynb_checkpoints*
+*.vscode*
