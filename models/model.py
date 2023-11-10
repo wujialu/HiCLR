@@ -1,13 +1,11 @@
 """ Onmt NMT Model base class definition """
-import copy
 import torch.nn as nn
 import torch
 
-from models.embedding import Embedding, TokenEmbedding, PromptEmbedding
+from models.embedding import Embedding, TokenEmbedding
 from models.module import MultiHeadedAttention
 from models.encoder import TransformerEncoder
 from models.decoder import TransformerDecoder
-
 
 class MolecularTransformer(nn.Module):
     """
@@ -22,7 +20,7 @@ class MolecularTransformer(nn.Module):
 
     def __init__(self, args, encoder_num_layers, decoder_num_layers, d_model, heads, d_ff, dropout,
                  vocab_size_src, vocab_size_tgt, shared_vocab, shared_encoder=False, src_pad_idx=1,
-                 tgt_pad_idx=1, multigpu=False, vocab_size_prompt=10):
+                 tgt_pad_idx=1, multigpu=False):
         self.multigpu = multigpu
         super(MolecularTransformer, self).__init__()
 
@@ -41,29 +39,23 @@ class MolecularTransformer(nn.Module):
         else:
             self.embedding_src = Embedding(vocab_size=vocab_size_src + 1, embed_size=d_model, padding_idx=src_pad_idx)
             self.embedding_tgt = Embedding(vocab_size=vocab_size_tgt + 1, embed_size=d_model, padding_idx=tgt_pad_idx)
-        
-        if args.prompt:
-            self.embedding_prompt = PromptEmbedding(vocab_size=vocab_size_prompt, embed_size=d_model)  # pretrained_emb
-        else:
-            self.embedding_prompt = None
-        
+
         multihead_attn_modules_en = nn.ModuleList(
-            [MultiHeadedAttention(args, heads, d_model, dropout=dropout)
+            [MultiHeadedAttention(heads, d_model, dropout=dropout)
              for _ in range(encoder_num_layers)])
         if shared_encoder:
             assert encoder_num_layers == decoder_num_layers
             multihead_attn_modules_de = multihead_attn_modules_en
         else:
             multihead_attn_modules_de = nn.ModuleList(
-                [MultiHeadedAttention(args, heads, d_model, dropout=dropout)
+                [MultiHeadedAttention(heads, d_model, dropout=dropout)
                  for _ in range(decoder_num_layers)])
 
         self.encoder = TransformerEncoder(args, num_layers=encoder_num_layers,
                                           d_model=d_model, heads=heads,
                                           d_ff=d_ff, dropout=dropout,
                                           embeddings=self.embedding_src,
-                                          attn_modules=multihead_attn_modules_en,
-                                          prompt_embeddings=self.embedding_prompt)
+                                          attn_modules=multihead_attn_modules_en)
 
         self.decoder = TransformerDecoder(args, num_layers=decoder_num_layers,
                                           d_model=d_model, heads=heads,
@@ -73,7 +65,19 @@ class MolecularTransformer(nn.Module):
 
         self.generator = nn.Sequential(nn.Linear(d_model, vocab_size_tgt),
                                        nn.LogSoftmax(dim=-1))
+
+        self.softmax = nn.Softmax(dim=-1)
         
+        self.attn_bn = args.attn_bn
+        self.attn_dim = args.attn_dim
+        self.attn_mode = args.attn_mode
+        if self.attn_mode == "prefix":
+            self.prefix_tokens = torch.arange(self.attn_bn).long().to(args.device)
+            # TODO: retro model for prefix initialization(instance-level prefix?)
+            self.prefix_key = nn.Embedding(self.attn_bn, self.attn_dim)
+            self.prefix_value = nn.Embedding(self.attn_bn, self.attn_dim)
+            self.prefix_map = MLP(size_layer=[self.attn_dim, self.d_model], dropout=dropout)
+
     def forward(self, src, tgt, dec_state=None, src_template_mask=None, tgt_template_mask=None, template_pooling=False):
         """Forward propagate a `src` and `tgt` pair for training.
         Possible initialized with a beginning decoder state.
@@ -101,11 +105,21 @@ class MolecularTransformer(nn.Module):
             src_emb, encoder_outputs, src_reps, src_template_reps = self.encoder(src, src_template_mask=src_template_mask, template_pooling=template_pooling)
             enc_state = \
                 self.decoder.init_decoder_state(src, encoder_outputs)
-            del src, src_template_mask, src_emb
             decoder_outputs, dec_state, attns, tgt_reps, tgt_template_reps = self.decoder(tgt, encoder_outputs,
                                                                                           enc_state if dec_state is None
                                                                                           else dec_state,
                                                                                           tgt_template_mask=tgt_template_mask, template_pooling=template_pooling)
+        elif self.attn_mode == "prefix":
+            prefix_key = self.prefix_map(self.prefix_key(self.prefix_tokens))
+            prefix_value = self.prefix_map(self.prefix_value(self.prefix_tokens))
+            src_emb, encoder_outputs, src_reps = self.encoder(src, src_template_mask=src_template_mask, prefix_key=prefix_key, prefix_value=prefix_value)
+            enc_state = \
+                self.decoder.init_decoder_state(src, encoder_outputs)
+            decoder_outputs, dec_state, attns, tgt_reps = self.decoder(tgt, encoder_outputs,
+                                                                       enc_state if dec_state is None
+                                                                       else dec_state,
+                                                                       tgt_template_mask=tgt_template_mask, 
+                                                                       prefix_key=prefix_key, prefix_value=prefix_value)
         
         else:
             src_emb, encoder_outputs, src_reps = self.encoder(src, src_template_mask=src_template_mask)
@@ -125,47 +139,28 @@ class MolecularTransformer(nn.Module):
             return generative_scores, attns, src_reps, tgt_reps, src_template_reps, tgt_template_reps
         else:
             return generative_scores, attns, src_reps, tgt_reps
-        
-    def forward_with_given_prompt(self, src, tgt, prompt, dec_state=None):
+
+    def extract_reaction_fp(self, src, tgt, dec_state=None, reaction_reps=None):
         tgt = tgt[:-1]
-        src_emb, encoder_outputs = self.encoder.forward_with_given_prompt(src, prompt)
-        enc_state = \
-            self.decoder.init_decoder_state(src, encoder_outputs)
-        decoder_outputs, dec_state, attns = self.decoder.forward_with_prompt(tgt, encoder_outputs,
-                                                                             enc_state if dec_state is None
-                                                                             else dec_state)
-        generative_scores = self.generator(decoder_outputs) 
-        return generative_scores, attns
-        
-    def forward_with_pred_prompt(self, src, tgt):
-        src_emb, encoder_outputs, src_reps, prompt_attn = self.encoder.forward_with_pred_prompt(src)
-        enc_state = \
-            self.decoder.init_decoder_state(src, encoder_outputs)
-        decoder_outputs, dec_state, attns, tgt_reps = self.decoder.forward_with_prompt(tgt, encoder_outputs,
-                                                                                       enc_state if dec_state is None
-                                                                                       else dec_state,
-                                                                                       prompt=True)
-        generative_scores = self.generator(decoder_outputs) 
-        return generative_scores, attns, src_reps, tgt_reps, prompt_attn
-    
-    def extract_reaction_fp(self, src, tgt, dec_state=None, return_cross_attn=False, return_token_featuers=False):
-        tgt = tgt[:-1]
-        src_emb, encoder_outputs, src_reps = self.encoder(src)
+        if reaction_reps is not None:
+            if reaction_reps.shape[1] == self.d_model * 2:
+                reaction_reps = self.linear(reaction_reps)
+            src_emb, encoder_outputs, src_reps = self.encoder(src, reaction_reps=reaction_reps, prompt=True)
+        else:
+            src_emb, encoder_outputs, src_reps = self.encoder(src)
         enc_state = \
             self.decoder.init_decoder_state(src, encoder_outputs)
         decoder_outputs, dec_state, attns, tgt_reps = self.decoder(tgt, encoder_outputs,
                                                                     enc_state if dec_state is None
                                                                     else dec_state)
-        if return_cross_attn:
-            return src_reps, tgt_reps, attns
-        elif return_token_featuers:
-            return encoder_outputs, decoder_outputs
-        else:   
-            return src_reps, tgt_reps
-    
-    def extract_mol_fp(self, src):
-        src_emb, encoder_outputs, src_reps = self.encoder(src)
-        return encoder_outputs, src_reps
+        return src_reps, tgt_reps
+
+    def extract_prompt_rep(self, src, tgt, dec_state=None, reaction_reps=None):
+        tgt = tgt[:-1]
+        if reaction_reps.shape[1] == self.d_model * 2:
+            reaction_reps = self.linear(reaction_reps)
+        src_emb, encoder_outputs, src_reps = self.encoder(src, reaction_reps=reaction_reps, prompt=True)
+        return encoder_outputs[0, :, :]  # [src_len x batch_size x model_dim]
 
     def extract_src_token_self_attention(self, src, tgt, dec_state=None, reaction_reps=None):
         tgt = tgt[:-1]
@@ -190,15 +185,13 @@ class MolecularTransformer(nn.Module):
 
 
 class ProjectNet(nn.Module):
-    def __init__(self, input_dim, hidden_dim=None, output_dim=None):
+    def __init__(self, rep_dim):
         super(ProjectNet, self).__init__()
-        self.input_dim = input_dim
-        self.hidden_dim = hidden_dim if hidden_dim is not None else input_dim
-        self.output_dim = output_dim if output_dim is not None else input_dim
+        self.rep_dim = rep_dim
         self.proj = nn.Sequential(
-            nn.Linear(self.input_dim, self.hidden_dim),
+            nn.Linear(self.rep_dim, self.rep_dim),
             nn.ReLU(),
-            nn.Linear(self.hidden_dim, self.output_dim)
+            nn.Linear(self.rep_dim, self.rep_dim)
         )
 
     def forward(self, x):
@@ -225,8 +218,6 @@ class MLP(nn.Module):
             'relu': nn.ReLU(),
             'tanh': nn.Tanh(),
             'sigmoid': nn.Sigmoid(),
-            "silu": nn.SiLU(),
-            "gelu": nn.GELU(),
         }
         if not isinstance(activation, list):
             activation = [activation] * (len(size_layer) - 2)
@@ -262,29 +253,9 @@ class MLP(nn.Module):
         return x
 
 
-class FinetunePredictor(nn.Module):
-    def __init__(self, transformer, task, feat_dim=256):
-        super().__init__()
-    
-        self.encoder = copy.deepcopy(transformer.encoder)
-        self.task = task
-        self.feat_dim = feat_dim
-
-        if self.task == 'classification':
-            self.pred_head = nn.Sequential(
-                nn.Linear(self.feat_dim, self.feat_dim//2), 
-                nn.Softplus(),
-                nn.Linear(self.feat_dim//2, 2)
-            )
-        elif self.task == 'regression':
-            self.pred_head = nn.Sequential(
-                nn.Linear(self.feat_dim, self.feat_dim//2), 
-                # nn.Softplus(),
-                nn.ReLU(),
-                nn.Linear(self.feat_dim//2, 1)
-            )
-    def forward(self, x):
-        _, token_emb, mol_emb = self.encoder(x.swapaxes(0,1))  #! x.shape=[batch_size, max_len]->[max_len, batch_size]
-        pred = self.pred_head(mol_emb)
-        
-        return pred
+class AdapterMT(MolecularTransformer):
+    """
+    encoder(adapter=True)
+    decoder(adapter=True)
+    """
+    pass
