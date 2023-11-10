@@ -11,7 +11,7 @@ import pandas as pd
 import torch
 import random
 from torch.utils.data import DataLoader
-from utils.dataset_hierar import RetroDataset, SimpleRetroDataset, ForwardDataset, PCLRetroDataset, PCLForwardDataset, HierarchicalBatchSampler
+from dataset import RetroDataset, ForwardDataset, PCLRetroDataset, PCLForwardDataset, DualDataset, ECDataset
 from models.model import MolecularTransformer
 
 
@@ -21,7 +21,6 @@ def set_random_seed(seed):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-
 
 def load_checkpoint(checkpoint_path, model, proj_src=None, proj_tgt=None):
     # checkpoint_path = os.path.join(args.checkpoint_dir, args.checkpoint)
@@ -46,19 +45,17 @@ def load_checkpoint(checkpoint_path, model, proj_src=None, proj_tgt=None):
     return step, optimizer, model, proj_src, proj_tgt
 
 
-def load_checkpoint(checkpoint_path, model, proj=None, optimizer=None):
-    """
-    load both the transformer and the projection net 
-    """
+def load_checkpoint_single_proj(checkpoint_path, model, proj=None):
+    # checkpoint_path = os.path.join(args.checkpoint_dir, args.checkpoint)
     print('Loading checkpoint from {}'.format(checkpoint_path))
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     model.load_state_dict(checkpoint['model'], strict=False)
     if proj is not None:
         proj.load_state_dict(checkpoint['proj'])
-    if optimizer is not None:
-        optimizer.load_state_dict(checkpoint['optim'])
+    optimizer = checkpoint['optim']
     step = checkpoint['step']
-    return step, model, proj, optimizer
+    # step += 1
+    return step, optimizer, model, proj
 
 
 def load_checkpoint_downstream(checkpoint_path, model, model_type=None):
@@ -66,6 +63,9 @@ def load_checkpoint_downstream(checkpoint_path, model, model_type=None):
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     if model_type is None:
         state_dict = checkpoint['model']
+        neglect_key = [k for k in state_dict.keys() if "position" in k]  # change max length
+        [state_dict.pop(k) for k in neglect_key]
+        print(f"Don't load paramaters: {neglect_key}")
         model.load_state_dict(state_dict, strict=False)
     else:
         model.load_state_dict(checkpoint[model_type], strict=False)
@@ -73,9 +73,6 @@ def load_checkpoint_downstream(checkpoint_path, model, model_type=None):
     return model
 
 def load_checkpoint_new_vocab(checkpoint_path, model, model_type=None):
-    """
-    If vocab size is changed, just need to re-initialize the word embedding layer
-    """
     print('Loading checkpoint from {}'.format(checkpoint_path))
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     if model_type is None:
@@ -109,12 +106,12 @@ def build_model(args, vocab_itos_src, vocab_itos_tgt, vocab_itos_ec=None):
 def build_forward_iterator(args, mode="train", sample=False, augment=False, sample_per_class=8, random_state=0):
     if mode == "train":
         dataset = ForwardDataset(mode='train', data_folder=args.data_dir,
-                                 known_class=args.known_class,
-                                 shared_vocab=args.shared_vocab, sample=sample, augment=augment,
-                                 sample_per_class=sample_per_class, random_state=random_state)
+                               known_class=args.known_class,
+                               shared_vocab=args.shared_vocab, sample=sample, augment=augment,
+                               sample_per_class=sample_per_class, random_state=random_state)
         dataset_val = ForwardDataset(mode='val', data_folder=args.data_dir,
-                                     known_class=args.known_class,
-                                     shared_vocab=args.shared_vocab)
+                                   known_class=args.known_class,
+                                   shared_vocab=args.shared_vocab)
         src_pad, tgt_pad = dataset.src_stoi['<pad>'], dataset.tgt_stoi['<pad>']
         train_iter = DataLoader(dataset, batch_size=args.batch_size_trn, shuffle=True, 
                                 collate_fn=partial(collate_fn, src_pad=src_pad, tgt_pad=tgt_pad, device=args.device))
@@ -124,8 +121,8 @@ def build_forward_iterator(args, mode="train", sample=False, augment=False, samp
 
     elif mode == "test":
         dataset = ForwardDataset(mode='test', data_folder=args.data_dir,
-                                 known_class=args.known_class,
-                                 shared_vocab=args.shared_vocab, data_file=args.data_file) 
+                               known_class=args.known_class,
+                               shared_vocab=args.shared_vocab, data_file=args.data_file) 
         src_pad, tgt_pad = dataset.src_stoi['<pad>'], dataset.tgt_stoi['<pad>']
         test_iter = DataLoader(dataset, batch_size=args.batch_size_val, shuffle=False, 
                                collate_fn=partial(collate_fn, src_pad=src_pad, tgt_pad=tgt_pad, device=args.device))
@@ -133,8 +130,8 @@ def build_forward_iterator(args, mode="train", sample=False, augment=False, samp
 
     elif mode == "pretrain":
         dataset = PCLForwardDataset(mode="train_val", data_folder=args.data_dir,
-                                    known_class=args.known_class,
-                                    shared_vocab=args.shared_vocab, sample=sample, augment=augment)
+                            known_class=args.known_class,
+                            shared_vocab=args.shared_vocab, sample=sample, augment=augment)
         src_pad, tgt_pad = dataset.src_stoi['<pad>'], dataset.tgt_stoi['<pad>']
         train_iter = DataLoader(dataset, batch_size=args.batch_size_trn, shuffle=not sample, 
                                 collate_fn=partial(collate_fn_pretrain, src_pad=src_pad, tgt_pad=tgt_pad, device=args.device))
@@ -144,44 +141,37 @@ def build_forward_iterator(args, mode="train", sample=False, augment=False, samp
         print("Please select a valid mode from pretrain/train/test")
 
 
-def build_retro_iterator(args, mode="train", sample=False, augment=False, sample_per_class=8, random_state=0, hierar_sampling=False, shuffle=False):
+def build_retro_iterator(args, mode="train", sample=False, augment=False):
     if mode == "train":
-        dataset = SimpleRetroDataset(mode='train', data_folder=args.data_dir,
+        dataset = RetroDataset(mode='train', data_folder=args.data_dir,
                                known_class=args.known_class,
-                               shared_vocab=args.shared_vocab, sample=sample, augment=augment,
-                               sample_per_class=sample_per_class, random_state=random_state)
-        dataset_val = SimpleRetroDataset(mode='val', data_folder=args.data_dir,
+                               shared_vocab=args.shared_vocab, sample=sample, augment=augment)
+        dataset_val = RetroDataset(mode='val', data_folder=args.data_dir,
                                    known_class=args.known_class,
-                                   shared_vocab=args.shared_vocab)
+                                   shared_vocab=args.shared_vocab, sample=sample)
         src_pad, tgt_pad = dataset.src_stoi['<pad>'], dataset.tgt_stoi['<pad>']
         train_iter = DataLoader(dataset, batch_size=args.batch_size_trn, shuffle=not sample, 
                                 collate_fn=partial(collate_fn, src_pad=src_pad, tgt_pad=tgt_pad, device=args.device))
         val_iter = DataLoader(dataset_val, batch_size=args.batch_size_val, shuffle=False, 
                               collate_fn=partial(collate_fn, src_pad=src_pad, tgt_pad=tgt_pad, device=args.device))
-        return train_iter, val_iter, dataset
+        return train_iter, val_iter, dataset.src_itos, dataset.tgt_itos
 
     elif mode == "test":
-        dataset = SimpleRetroDataset(mode='test', data_folder=args.data_dir,
-                                     known_class=args.known_class,
-                                     shared_vocab=args.shared_vocab, data_file=args.data_file) 
+        dataset = RetroDataset(mode='test', data_folder=args.data_dir,
+                               known_class=args.known_class,
+                               shared_vocab=args.shared_vocab, data_file=args.data_file)  #! no need to build vocab
         src_pad, tgt_pad = dataset.src_stoi['<pad>'], dataset.tgt_stoi['<pad>']
-        test_iter = DataLoader(dataset, batch_size=args.batch_size_val, shuffle=shuffle, num_workers=0,
+        test_iter = DataLoader(dataset, batch_size=args.batch_size_val, shuffle=False, num_workers=0,
                                collate_fn=partial(collate_fn, src_pad=src_pad, tgt_pad=tgt_pad, device=args.device))
         return test_iter, dataset
 
     elif mode == "pretrain":
         dataset = PCLRetroDataset(mode="train_val", data_folder=args.data_dir,
-                                  known_class=args.known_class,
-                                  shared_vocab=args.shared_vocab, sample=sample, augment=augment)
+                            known_class=args.known_class,
+                            shared_vocab=args.shared_vocab, sample=sample, augment=augment)
         src_pad, tgt_pad = dataset.src_stoi['<pad>'], dataset.tgt_stoi['<pad>']
-        if hierar_sampling:
-            sampler = HierarchicalBatchSampler(batch_size=args.batch_size_trn, drop_last=False, dataset=dataset)
-            train_iter = DataLoader(dataset, batch_size=1, num_workers=0,
-                                    collate_fn=partial(collate_fn_pretrain, src_pad=src_pad, tgt_pad=tgt_pad, device=args.device),
-                                    sampler=sampler) #! customized sampler, not allow shuffle
-        else:
-            train_iter = DataLoader(dataset, batch_size=args.batch_size_trn, shuffle=not sample, num_workers=0,
-                                    collate_fn=partial(collate_fn_pretrain, src_pad=src_pad, tgt_pad=tgt_pad, device=args.device)) 
+        train_iter = DataLoader(dataset, batch_size=args.batch_size_trn, shuffle=not sample,  # num_workers=8,
+                                collate_fn=partial(collate_fn_pretrain, src_pad=src_pad, tgt_pad=tgt_pad, device=args.device))
         return train_iter, dataset.src_itos, dataset.tgt_itos
     
     else:
@@ -263,77 +253,69 @@ def collate_fn_pretrain(data, src_pad, tgt_pad, device='cuda'):
     """
     # Sort a data list by caption length
     # data.sort(key=lambda x: len(x[0]), reverse=True)
-
-    if len(data) == 1:
-        src, tgt, alignment, src_1, tgt_1, src_2, tgt_2, reaction_class = data[0]
-        batch_size = len(src)
-    else:
-        src, tgt, alignment, src_1, tgt_1, src_2, tgt_2, reaction_class = zip(*data)
-        batch_size = len(data)
-    
-
-    max_src_length = max(max([len(s) for s in src]), max([len(s) for s in src_1]), max([len(s) for s in src_2]))
-    max_tgt_length = max(max([len(t) for t in tgt]), max([len(t) for t in tgt_1]), max([len(t) for t in tgt_2]))
+    src, tgt, src_template_mask, tgt_template_mask, src_permute, tgt_permute, reaction_class = zip(*data)
+    max_src_length = max([len(s) for s in src])
+    max_tgt_length = max([len(t) for t in tgt])
+    max_src_permute_length = max([len(s) for s in src_permute])
+    max_tgt_permute_length = max([len(t) for t in tgt_permute])
 
     anchor = torch.zeros([], device=device)
 
     # Pad_sequence
-    new_src = anchor.new_full((max_src_length, batch_size), src_pad, dtype=torch.long)
-    new_tgt = anchor.new_full((max_tgt_length, batch_size), tgt_pad, dtype=torch.long)
-    new_src_1 = anchor.new_full((max_src_length, batch_size), src_pad, dtype=torch.long)
-    new_tgt_1 = anchor.new_full((max_tgt_length, batch_size), tgt_pad, dtype=torch.long)
-    new_src_2 = anchor.new_full((max_src_length, batch_size), src_pad, dtype=torch.long)
-    new_tgt_2 = anchor.new_full((max_tgt_length, batch_size), tgt_pad, dtype=torch.long)
-    new_alignment = anchor.new_zeros((batch_size, max_tgt_length - 1, max_src_length), dtype=torch.float)
+    new_src = anchor.new_full((max_src_length, len(data)), src_pad, dtype=torch.long)
+    new_tgt = anchor.new_full((max_tgt_length, len(data)), tgt_pad, dtype=torch.long)
+    new_src_permute = anchor.new_full((max_src_permute_length, len(data)), src_pad, dtype=torch.long)
+    new_tgt_permute = anchor.new_full((max_tgt_permute_length, len(data)), tgt_pad, dtype=torch.long)
+    #! template_mask=1 means the token is in template-matched substructure
+    new_src_template_mask = anchor.new_zeros((max_src_length, len(data)), dtype=torch.bool)
+    new_tgt_template_mask = anchor.new_zeros((max_tgt_length, len(data)), dtype=torch.bool)
 
-    for i in range(batch_size):
+    for i in range(len(data)):
         new_src[:, i][:len(src[i])] = torch.LongTensor(src[i])
+        new_src_permute[:, i][:len(src_permute[i])] = torch.LongTensor(src_permute[i])
         new_tgt[:, i][:len(tgt[i])] = torch.LongTensor(tgt[i])
+        new_tgt_permute[:, i][:len(tgt_permute[i])] = torch.LongTensor(tgt_permute[i])
+        new_src_template_mask[:, i][:len(src_template_mask[i])] = torch.BoolTensor(src_template_mask[i])  
+        new_tgt_template_mask[:, i][:len(tgt_template_mask[i])] = torch.BoolTensor(tgt_template_mask[i])
 
-        new_src_1[:, i][:len(src_1[i])] = torch.LongTensor(src_1[i])
-        new_src_2[:, i][:len(src_2[i])] = torch.LongTensor(src_2[i])
-        new_tgt_1[:, i][:len(tgt_1[i])] = torch.LongTensor(tgt_1[i])
-        new_tgt_2[:, i][:len(tgt_2[i])] = torch.LongTensor(tgt_2[i])
-        new_alignment[i, :alignment[i].shape[0], :alignment[i].shape[1]] = alignment[i].float()
-
-
-    return new_src, new_tgt, new_alignment, new_src_1, new_tgt_1, new_src_2, new_tgt_2, torch.tensor(reaction_class)
+    return new_src, new_tgt, new_src_permute, new_tgt_permute, new_src_template_mask, new_tgt_template_mask, torch.tensor(reaction_class)
 
 
 def accumulate_batch_pretrain(true_batch, src_pad=1, tgt_pad=1):
-    src_max_length, tgt_max_length, entry_count = 0, 0, 0
+    src_max_length, tgt_max_length, entry_count, src_permute_max_length, tgt_permute_max_length = 0, 0, 0, 0, 0
     batch_size = true_batch[0][0].shape[1]
-    hierar_level = true_batch[0][-1].shape[1]
     for batch in true_batch:
-        src, tgt, _, _, _, _, _, _ = batch
+        src, tgt, src_permute, tgt_permute, _, _, _ = batch
         src_max_length = max(src.shape[0], src_max_length)
         tgt_max_length = max(tgt.shape[0], tgt_max_length)
+        src_permute_max_length = max(src_permute.shape[0], src_permute_max_length)
+        tgt_permute_max_length = max(tgt_permute.shape[0], tgt_permute_max_length)
         entry_count += tgt.shape[1]
 
     new_src = torch.zeros((src_max_length, entry_count)).fill_(src_pad).long()
     new_tgt = torch.zeros((tgt_max_length, entry_count)).fill_(tgt_pad).long()
-    new_align = torch.zeros((entry_count, tgt_max_length - 1, src_max_length)).float()
-    new_src_1 = torch.zeros((src_max_length, entry_count)).fill_(src_pad).long()
-    new_tgt_1 = torch.zeros((tgt_max_length, entry_count)).fill_(tgt_pad).long()
-    new_src_2 = torch.zeros((src_max_length, entry_count)).fill_(src_pad).long()
-    new_tgt_2 = torch.zeros((tgt_max_length, entry_count)).fill_(tgt_pad).long()
-    new_reaction_class = torch.zeros(entry_count, hierar_level)
+    new_src_permute = torch.zeros((src_permute_max_length, entry_count)).fill_(src_pad).long()
+    new_tgt_permute = torch.zeros((tgt_permute_max_length, entry_count)).fill_(tgt_pad).long()
+    new_src_template_mask = torch.zeros((src_max_length, entry_count))
+    new_tgt_template_mask = torch.zeros((tgt_max_length, entry_count))
+    new_reaction_class = torch.zeros(entry_count)
 
     for i in range(len(true_batch)):
-        src, tgt, align, src_1, tgt_1, src_2, tgt_2, reaction_class = true_batch[i]
+        src, tgt, src_permute, tgt_permute, src_template_mask, tgt_template_mask, reaction_class = true_batch[i]
         new_src[:, batch_size * i: batch_size * (i + 1)][:src.shape[0]] = src
         new_tgt[:, batch_size * i: batch_size * (i + 1)][:tgt.shape[0]] = tgt
-        new_align[batch_size * i: batch_size * (i + 1), :align.shape[1], :align.shape[2]] = align
-        new_src_1[:, batch_size * i: batch_size * (i + 1)][:src_1.shape[0]] = src_1
-        new_tgt_1[:, batch_size * i: batch_size * (i + 1)][:tgt_1.shape[0]] = tgt_1
-        new_src_2[:, batch_size * i: batch_size * (i + 1)][:src_2.shape[0]] = src_2
-        new_tgt_2[:, batch_size * i: batch_size * (i + 1)][:tgt_2.shape[0]] = tgt_2
+        new_src_permute[:, batch_size * i: batch_size * (i + 1)][:src_permute.shape[0]] = src_permute
+        new_tgt_permute[:, batch_size * i: batch_size * (i + 1)][:tgt_permute.shape[0]] = tgt_permute
+
+        new_src_template_mask[:, batch_size * i: batch_size * (i + 1)][:src_template_mask.shape[0]] = src_template_mask
+        new_tgt_template_mask[:, batch_size * i: batch_size * (i + 1)][:tgt_template_mask.shape[0]] = tgt_template_mask
+
         new_reaction_class[batch_size * i: batch_size * (i + 1)] =  reaction_class
 
-    return new_src, new_tgt, new_align, new_src_1, new_tgt_1, new_src_2, new_tgt_2, new_reaction_class
+    return new_src, new_tgt, new_src_permute, new_tgt_permute, new_src_template_mask, new_tgt_template_mask, new_reaction_class
 
 
-# dataset.__getitem__ --> collate_fn(for padding) --> accumulate_batch(for using batch_size_tokens)
+# dataset.__getitem__ --> collate_fn --> accumulate_batch
 def collate_fn(data, src_pad, tgt_pad, device='cuda'):
     """Build mini-batch tensors:
     :param sep: (int) index of src seperator
@@ -341,35 +323,28 @@ def collate_fn(data, src_pad, tgt_pad, device='cuda'):
     """
     # Sort a data list by caption length
     # data.sort(key=lambda x: len(x[0]), reverse=True)
-    src, tgt, reaction_class, reaction_id, reagents, alignment = zip(*data)
+    src, src_graph, tgt, context_alignment, nonreact_mask, rt, id, gt_proto = zip(*data)
     max_src_length = max([len(s) for s in src])
     max_tgt_length = max([len(t) for t in tgt])
-    batch_size = len(data)
 
     anchor = torch.zeros([], device=device)
 
     # Pad_sequence
     new_src = anchor.new_full((max_src_length, len(data)), src_pad, dtype=torch.long)
     new_tgt = anchor.new_full((max_tgt_length, len(data)), tgt_pad, dtype=torch.long)
-    new_alignment = anchor.new_zeros((batch_size, max_tgt_length - 1, max_src_length), dtype=torch.int)
 
     for i in range(len(data)):
         new_src[:, i][:len(src[i])] = torch.LongTensor(src[i])
         new_tgt[:, i][:len(tgt[i])] = torch.LongTensor(tgt[i])
-        new_alignment[i, :alignment[i].shape[0], :alignment[i].shape[1]] = alignment[i].float()
-    
-    try:
-        new_reagents = torch.stack(reagents, dim=0)
-        return new_src, new_tgt, torch.tensor(reaction_class), torch.tensor(reaction_id), new_reagents
-    except:
-        return new_src, new_tgt, torch.tensor(reaction_class), torch.tensor(reaction_id), torch.tensor(new_alignment)
+
+    return new_src, new_tgt, torch.tensor(rt), torch.tensor(id), torch.tensor(gt_proto)
 
 
 def accumulate_batch(true_batch, src_pad=1, tgt_pad=1):
     src_max_length, tgt_max_length, entry_count = 0, 0, 0
     batch_size = true_batch[0][0].shape[1]
     for batch in true_batch:
-        src, tgt, rt, id, align = batch
+        src, tgt, rt, id, gt_proto = batch
         src_max_length = max(src.shape[0], src_max_length)
         tgt_max_length = max(tgt.shape[0], tgt_max_length)
         entry_count += tgt.shape[1]
@@ -378,22 +353,21 @@ def accumulate_batch(true_batch, src_pad=1, tgt_pad=1):
     new_tgt = torch.zeros((tgt_max_length, entry_count)).fill_(tgt_pad).long()
     new_reaction_class = torch.zeros(entry_count)
     new_id = torch.zeros(entry_count)
-    new_align = torch.zeros((entry_count, tgt_max_length - 1, src_max_length)).float()
+    new_proto = torch.zeros(entry_count)
 
     for i in range(len(true_batch)):
-        src, tgt, rt, id, align = true_batch[i]
+        src, tgt, rt, id, gt_proto = true_batch[i]
         new_src[:, batch_size * i: batch_size * (i + 1)][:src.shape[0]] = src
         new_tgt[:, batch_size * i: batch_size * (i + 1)][:tgt.shape[0]] = tgt
         new_reaction_class[batch_size * i: batch_size * (i + 1)] =  rt
         new_id[batch_size * i: batch_size * (i + 1)] =  id
-        new_align[batch_size * i: batch_size * (i + 1), :align.shape[1], :align.shape[2]] = align
+        new_proto[batch_size * i: batch_size * (i + 1)] =  gt_proto
 
-    return new_src, new_tgt, new_reaction_class, new_id, new_align
+    return new_src, new_tgt, new_reaction_class, new_id, new_proto
 
 
 def build_iterator(args, mode="train", sample=False, sample_per_class=8, random_state=0):
-    df = pd.read_csv(os.path.join(args.data_dir, f"raw_{mode}.csv"))
-    fps = np.load(os.path.join(args.data_dir, f"{args.fp_col}_fps.npz"))[mode]
+    df = pd.read_csv(os.path.join(args.data_dir, f"raw_{mode}_fps.csv"))
     if sample:
         reaction_class = df["class"].unique()
         sample_index = np.array([])
@@ -401,9 +375,8 @@ def build_iterator(args, mode="train", sample=False, sample_per_class=8, random_
             class_index = df[df["class"]==class_id].sample(n=sample_per_class, random_state=random_state).index.values
             sample_index = np.concatenate([sample_index, class_index])
         df = df.iloc[sample_index, :].reset_index(drop=True)
-        fps = fps[sample_index.astype(np.int32)]
 
-    # fps = list(map(eval, df[args.fp_col])) 
+    fps = list(map(eval, df[args.fp_col]))
     labels = df["class"].tolist()
     dataset = list(zip(fps, labels))
     len_fp = len(fps[0])
@@ -424,6 +397,58 @@ def collate_fps(data):
 
     return torch.tensor(fps).float(), torch.tensor(labels)
 
+
+def build_ecreact_iterator(args, mode="train", augment=False):
+    if mode == "train":
+        dataset = ECDataset(mode='train', data_folder=args.data_dir,
+                            known_class=False,
+                            shared_vocab=args.shared_vocab, augment=augment)
+        dataset_val = ECDataset(mode='val', data_folder=args.data_dir,
+                                known_class=False,
+                                shared_vocab=args.shared_vocab)
+        src_pad, tgt_pad = dataset.src_stoi['<pad>'], dataset.tgt_stoi['<pad>'] # pad_idx=1
+        train_iter = DataLoader(dataset, batch_size=args.batch_size_trn, shuffle=True,
+                                collate_fn=partial(collate_fn_ecreact, src_pad=src_pad, tgt_pad=tgt_pad, device=args.device))
+        val_iter = DataLoader(dataset_val, batch_size=args.batch_size_val, shuffle=False, 
+                              collate_fn=partial(collate_fn_ecreact, src_pad=src_pad, tgt_pad=tgt_pad, device=args.device))
+        return train_iter, val_iter, dataset.src_itos, dataset.tgt_itos, dataset.ec_itos
+
+    elif mode == "test":
+        dataset = ECDataset(mode='test', data_folder=args.data_dir,
+                            known_class=False,
+                            shared_vocab=args.shared_vocab, data_file=args.data_file) 
+        src_pad, tgt_pad = dataset.src_stoi['<pad>'], dataset.tgt_stoi['<pad>']
+        test_iter = DataLoader(dataset, batch_size=args.batch_size_val, shuffle=False, num_workers=0,
+                               collate_fn=partial(collate_fn_ecreact, src_pad=src_pad, tgt_pad=tgt_pad, device=args.device))
+        return test_iter, dataset
+    
+    
+def collate_fn_ecreact(data, src_pad, tgt_pad, device='cuda'):
+    """Build mini-batch tensors:
+    :param sep: (int) index of src seperator
+    :param pads: (tuple) index of src and tgt padding
+    """
+    # Sort a data list by caption length
+    # data.sort(key=lambda x: len(x[0]), reverse=True)
+    src, tgt, ec = zip(*data) 
+    max_src_length = max([len(s) for s in src])  
+    max_tgt_length = max([len(t) for t in tgt])  
+
+    anchor = torch.zeros([], device=device)
+
+    # Pad_sequence
+    new_src = anchor.new_full((max_src_length, len(data)), src_pad, dtype=torch.long)
+    new_tgt = anchor.new_full((max_tgt_length, len(data)), tgt_pad, dtype=torch.long)
+
+    for i in range(len(data)):
+        new_src[:, i][:len(src[i])] = torch.LongTensor(src[i])
+        new_tgt[:, i][:len(tgt[i])] = torch.LongTensor(tgt[i])
+    
+    new_ec = torch.LongTensor(ec).permute(1,0).to(device)
+    return new_src, new_tgt, new_ec
+
+
+def accumulate_batch_ecreact(true_batch, src_pad=1, tgt_pad=1):
     src_max_length, tgt_max_length, entry_count = 0, 0, 0
     batch_size = true_batch[0][0].shape[1]
     len_ec = true_batch[0][-1].shape[0]
@@ -444,3 +469,84 @@ def collate_fps(data):
         new_ec[:, batch_size * i: batch_size * (i + 1)] = ec
         
     return new_src, new_tgt, new_ec
+
+
+def build_dual_iterator(args, mode="train", sample=False, augment=False):
+    if mode == "train":
+        dataset = DualDataset(mode='train', data_folder=args.data_dir,
+                               known_class=False,
+                               shared_vocab=args.shared_vocab, sample=sample, augment=augment)
+        dataset_val = DualDataset(mode='val', data_folder=args.data_dir,
+                                   known_class=False,
+                                   shared_vocab=args.shared_vocab, sample=sample)
+        src_pad, tgt_pad = dataset.src_stoi["retro"]['<pad>'], dataset.tgt_stoi["retro"]['<pad>'] # pad_idx=1
+        train_iter = DataLoader(dataset, batch_size=args.batch_size_trn, shuffle=not sample, 
+                                collate_fn=partial(collate_fn_dual, src_pad=src_pad, tgt_pad=tgt_pad, device=args.device))
+        val_iter = DataLoader(dataset_val, batch_size=args.batch_size_val, shuffle=False, 
+                              collate_fn=partial(collate_fn_dual, src_pad=src_pad, tgt_pad=tgt_pad, device=args.device))
+        return train_iter, val_iter, dataset.src_itos, dataset.tgt_itos, dataset.y_mean, dataset.y_std
+
+    elif mode == "test":
+        dataset = DualDataset(mode='test', data_folder=args.data_dir,
+                               known_class=False,
+                               shared_vocab=args.shared_vocab, data_file=args.data_file) 
+        src_pad, tgt_pad = dataset.src_stoi["retro"]['<pad>'], dataset.tgt_stoi["retro"]['<pad>']
+        test_iter = DataLoader(dataset, batch_size=args.batch_size_val, shuffle=False, num_workers=0,
+                               collate_fn=partial(collate_fn_dual, src_pad=src_pad, tgt_pad=tgt_pad, device=args.device))
+        return test_iter, dataset
+    
+    
+def collate_fn_dual(data, src_pad, tgt_pad, device='cuda'):
+    """Build mini-batch tensors:
+    :param sep: (int) index of src seperator
+    :param pads: (tuple) index of src and tgt padding
+    """
+    # Sort a data list by caption length
+    # data.sort(key=lambda x: len(x[0]), reverse=True)
+    src_retro, tgt_retro, src_forward, tgt_forward, rt, id = zip(*data) 
+    max_src_length = max([len(s) for s in src_forward])  # reacts+reagents
+    max_tgt_length = max([len(t) for t in tgt_forward])  # prods
+
+    anchor = torch.zeros([], device=device)
+
+    # Pad_sequence
+    new_src_retro = anchor.new_full((max_tgt_length, len(data)), src_pad, dtype=torch.long)
+    new_tgt_retro = anchor.new_full((max_src_length+1, len(data)), tgt_pad, dtype=torch.long)
+    new_src_forward = anchor.new_full((max_src_length, len(data)), src_pad, dtype=torch.long)
+    new_tgt_forward = anchor.new_full((max_tgt_length, len(data)), tgt_pad, dtype=torch.long)
+
+    for i in range(len(data)):
+        new_src_retro[:, i][:len(src_retro[i])] = torch.LongTensor(src_retro[i])
+        new_tgt_retro[:, i][:len(tgt_retro[i])] = torch.LongTensor(tgt_retro[i])
+        new_src_forward[:, i][:len(src_forward[i])] = torch.LongTensor(src_forward[i])
+        new_tgt_forward[:, i][:len(tgt_forward[i])] = torch.LongTensor(tgt_forward[i])
+
+    return new_src_retro, new_tgt_retro, new_src_forward, new_tgt_forward, torch.tensor(rt), torch.tensor(id)
+
+
+def accumulate_batch_dual(true_batch, src_pad=1, tgt_pad=1):
+    src_max_length, tgt_max_length, entry_count = 0, 0, 0
+    batch_size = true_batch[0][0].shape[1]
+    for batch in true_batch:
+        src_retro, tgt_retro, src_forward, tgt_forward, rt, id = batch
+        src_max_length = max(src_forward.shape[0], src_max_length)
+        tgt_max_length = max(tgt_forward.shape[0], tgt_max_length)
+        entry_count += tgt.shape[1]
+
+    new_src_retro = torch.zeros((tgt_max_length, entry_count)).fill_(src_pad).long()
+    new_tgt_retro = torch.zeros((src_max_length+1, entry_count)).fill_(tgt_pad).long()
+    new_src_forward = torch.zeros((src_max_length, entry_count)).fill_(src_pad).long()
+    new_tgt_forward = torch.zeros((tgt_max_length, entry_count)).fill_(tgt_pad).long()
+    new_reaction_class = torch.zeros(entry_count)
+    new_id = torch.zeros(entry_count)
+
+    for i in range(len(true_batch)):
+        src, tgt, id = true_batch[i]
+        new_src_retro[:, batch_size * i: batch_size * (i + 1)][:src_retro.shape[0]] = src_retro
+        new_tgt_retro[:, batch_size * i: batch_size * (i + 1)][:tgt_retro.shape[0]] = tgt_retro
+        new_src_forward[:, batch_size * i: batch_size * (i + 1)][:src_forward.shape[0]] = src_forward
+        new_tgt_forward[:, batch_size * i: batch_size * (i + 1)][:tgt_forward.shape[0]] = tgt_forward
+        new_reaction_class[batch_size * i: batch_size * (i + 1)] =  rt
+        new_id[batch_size * i: batch_size * (i + 1)] =  id
+
+    return new_src_retro, new_tgt_retro, new_src_forward, new_tgt_forward, new_reaction_class, new_id
