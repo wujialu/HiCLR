@@ -1,0 +1,24 @@
+database_path: './data/uspto_condition/uspto_condition'
+database_name: 'USPTO_condition'
+using_super_class_to_test: true
+model_path: ./results
+model_name: sequential_adapter_drop0.4
+train_transformer: true
+use_temperature: false
+gpu: 3
+lr: 0.001  
+batch_size: 128  # 512
+epochs: 150 # default: 150, 100 epochs is not enough
+h_dim: 1000  # 1000
+dropout_rate: 0.4 # 0.5
+top_fname: test_have_catalyst_dataset_uspto_supercls_accuracy.csv
+condition_to_calculate:
+  - c1
+  - s1
+  - r1
+topk_rank_thres:   # compare to the baseline table
+  c1: 1
+  s1: 3
+  s2: 1
+  r1: 5
+  r2: 1

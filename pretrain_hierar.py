@@ -1,120 +1,23 @@
+import os
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+
 import torch
 import torch.optim as optim
 import numpy as np
 from tqdm import tqdm
-import copy
-import argparse
-import os
 import json
-import lmdb
-import pickle
 from models.model import ProjectNet
 from utils.build_utils import build_forward_iterator, build_retro_iterator, build_model, load_checkpoint, accumulate_batch_pretrain, set_random_seed
 from utils.logging import init_logger, TensorboardLogger
 from utils.loss_utils import LabelSmoothingLoss, SupConLoss, HMLC, SelfPacedSupConLoss, SelfPacedHMLC, is_normalized
 from datetime import datetime
-from torch.utils.tensorboard import SummaryWriter
-from copy import deepcopy
+from args_parse import args_parser
 
 # filter warnings
 import warnings
 warnings.filterwarnings("ignore")
 from rdkit import RDLogger
 RDLogger.DisableLog('rdApp.*')
-
-os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-
-# TODO: support for multigpu
-# TODO: .yml for fixed paramaters
-
-def arg_parse(params=None):
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument('--debug', action="store_true", default=False)
-    parser.add_argument("--enable_tensorboard",
-                        action='store_true', default=False)
-
-    parser.add_argument('--device', type=str, default='cuda')
-    parser.add_argument('--batch_size_trn', type=int, default=8, help='raw train batch size')
-    parser.add_argument('--batch_size_val', type=int, default=8, help='val/test batch size')
-    parser.add_argument('--batch_size_token', type=int, default=32786,
-                        help='train batch token number')  #! retroformer: batch_size_token=16384, batch_size=8
-    parser.add_argument('--epochs', type=int, default=40)
-    parser.add_argument('--max_pretrain_step',type=int, default=10000)
-    parser.add_argument('--report_per_step', type=int, default=200, help='train loss reporting steps frequency')
-    parser.add_argument('--save_per_step', type=int, default=1000, help='checkpoint saving steps frequency')
-    parser.add_argument('--val_per_step', type=int, default=1000, help='validation steps frequency')
-    parser.add_argument('--lr', type=float, default=1e-3,
-                        help='learning rate (default: 0.001)')
-    parser.add_argument('--proto_lr', type=float, default=1e-4,
-                        help='prototype learning rate (default: 0.0001)')
-    parser.add_argument('--decay', type=float, default=0,
-                        help='weight decay (default: 0)')
-    parser.add_argument('--data_file',type=str, default=None)
-    
-    # model parameters #! check default parameters in Molecular Transformer
-    parser.add_argument('--mode', type=str, default='backward', choices=["forward", "backward"])
-    parser.add_argument('--data_dir', type=str, default='./data/debug', help='base directory')
-    parser.add_argument('--seed', type=int, default=0, help="Seed for splitting dataset.")
-    parser.add_argument('--num_workers', type=int, default=1, help='number of workers for dataset loading')
-    parser.add_argument('--exp_dir', type=str, default='./result/uspto_1K_debug', help='result directory')
-    parser.add_argument('--checkpoint', type=str, default='', help='checkpoint model file')
-    parser.add_argument('--encoder_num_layers', type=int, default=4, help='number of layers of transformer')
-    parser.add_argument('--decoder_num_layers', type=int, default=4, help='number of layers of transformer')
-    parser.add_argument('--d_model', type=int, default=256, help='dimension of model representation')
-    parser.add_argument('--heads', type=int, default=8, help='number of heads of multi-head attention')
-    parser.add_argument('--d_ff', type=int, default=2048, help='')
-    parser.add_argument('--dropout', type=float, default=0.1, help='dropout rate')
-    parser.add_argument('--known_class', action="store_true", default=False)
-    parser.add_argument('--shared_vocab', action="store_true", default=False)
-    parser.add_argument('--shared_encoder', action="store_true", default=False)
-
-    # prototypical learning
-    parser.add_argument('--tau', type=float, default=0.1, help='the temperature parameter for softmax') 
-    parser.add_argument('--proto_tau', type=float, default=0.1) 
-    parser.add_argument('--decay_ratio', type=float, default=0.95, help='the decay ratio for moving average') 
-    parser.add_argument('--num_proto', type=int, default=50, help='the number of initial prototypes')
-    parser.add_argument('--sp_strategy', type=str, default='soft', choices=["hard", "soft"]) 
-    parser.add_argument('--sp_gamma_min', type=float, default=1) 
-    parser.add_argument('--sp_gamma_max', type=float, default=30) 
-    parser.add_argument('--correct_grad', action="store_true", default=False)
-    parser.add_argument('--contrastive_loss_type', type=str, default="hmlc", choices=["supcon", "hmlc", "selfpaced_supcon", "selfpaced_hmlc"])
-    parser.add_argument('--hmlc_loss_type', type=str, default='hmce', choices=["hmc", "hce", "hmce", "supcon"])
-    parser.add_argument('--layer_penalty', type=str, default='pow2', choices=["pow2", "exp"])
-    parser.add_argument('--supcon_level', type=str, default='rxn', choices=["rxn", "template", "superclass"])
-    parser.add_argument('--hierar_sampling', action="store_true", default=False)
-    parser.add_argument('--supervised_scale', type=str, default="reaction", choices=["reaction", "template"])
-    parser.add_argument('--template_coeff', type=float, default=1, help='the weight of template NCE loss')
-    parser.add_argument('--permute_coeff', type=float, default=1, help='the weight of permute NCE loss')
-    parser.add_argument('--proto_coeff', type=float, default=1, help='the weight of prototype NCE loss')
-    parser.add_argument('--token_loss_coeff', type=float, default=1, help='the weight of language modeling loss')
-    parser.add_argument('--contrast_loss_coeff', type=float, default=0.1, help='the weight of contrastive learning loss')
-    parser.add_argument('--label_smoothing', type=float, default=0.1, help="label smoothing for language modeling loss")
-    parser.add_argument('--reaction_rep_mode', type=str, default='concat', choices=["concat", "substract"])
-    parser.add_argument('--proj_mode', type=str, default='non-linear', choices=["non-linear", "linear"])
-    
-    # delta tuning params
-    parser.add_argument('--ft_mode', type=str, default='petl', choices=["petl", "full", "none"]) 
-    parser.add_argument('--ffn_mode', type=str, default='none', choices=["none", "adapter"])
-    parser.add_argument('--ffn_option', type=str, default="none", choices=["parallel", "sequential", "none"])
-    parser.add_argument('--ffn_bn', type=int, default=256)
-    parser.add_argument('--ffn_adapter_scalar', type=str, default="1")  # learnable or fixed 
-    parser.add_argument('--ffn_adapter_init_option', type=str, default="lora", choices=["bert", "lora"])
-    parser.add_argument('--ffn_adapter_layernorm_option', type=str, default="none", choices=["in", "out", "none"]) 
-    parser.add_argument('--attn_mode', type=str, default='none', choices=["none", "prefix", "lora", "adapter"])
-    parser.add_argument('--attn_bn', type=int, default=10)
-    parser.add_argument('--attn_dim', type=int, default=32)
-    
-    # prompt    
-    parser.add_argument('--prompt', action="store_true", default=False)
-    parser.add_argument('--input_prompt_attn', action="store_true", default=False)
-    parser.add_argument('--proto_hierarchy', type=int, default=3, help='the number of hierarchy')
-    parser.add_argument('--proto_path', type=str, default='./result/ecreact')
-    parser.add_argument('--proto_version', type=str, default="top", choices=["bottom", "middle", "top", "hierarchy", "namerxn"])
-    parser.add_argument('--freeze_proto', action="store_true", default=False)
-    
-    args = parser.parse_args(params)
-    return args
 
 
 def _tally_parameters(model):
@@ -459,10 +362,8 @@ def main(args):
     args.tensorboard_logger.save(os.path.join(args.exp_dir, 'logged_data.pkl.gz'))
 
 
-# os.environ["CUDA_VISIBLE_DEVICES"] = "1"
-# os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 if __name__ == "__main__":
-    args = arg_parse()
+    args = args_parser()
     
     dt = datetime.now()
     args.exp_dir = os.path.join(args.exp_dir, '{}_{:02d}-{:02d}-{:02d}'.format(

@@ -10,10 +10,17 @@ import numpy as np
 import pandas as pd
 import torch
 import random
+import pickle
 from torch.utils.data import DataLoader
-from dataset import RetroDataset, ForwardDataset, PCLRetroDataset, PCLForwardDataset, DualDataset, ECDataset
+from dataset_hierar import RetroDataset, ForwardDataset, PCLRetroDataset, PCLForwardDataset, DualDataset, ECDataset
 from models.model import MolecularTransformer
 
+def load_vocab(vocab_file="vocab_share.pk"):
+    with open(vocab_file, 'rb') as f:
+        src_itos, tgt_itos = pickle.load(f)
+    src_stoi = {src_itos[i]: i for i in range(len(src_itos))}
+    tgt_stoi = {tgt_itos[i]: i for i in range(len(tgt_itos))}
+    return src_itos, src_stoi, tgt_itos, tgt_stoi
 
 def set_random_seed(seed):
     np.random.seed(seed)
