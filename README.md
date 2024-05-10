@@ -37,7 +37,7 @@ Activate the environment
 
 ## **Download resources**
 
-To download the datasets and checkpoints: https://zenodo.org/records/10072898.
+To download the datasets and checkpoints: https://zenodo.org/records/11169946.
 
 Unzip the data.zip and put it in the `HiCLR/data` directory.
 
