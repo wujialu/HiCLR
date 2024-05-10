@@ -98,7 +98,7 @@ if __name__ == "__main__":
     for batch_data in tqdm(loader):
         src_token_ids, tgt_token_ids = batch_data
         src_token_ids, tgt_token_ids = src_token_ids.to(args.device), tgt_token_ids.to(args.device)
-        src_reps, tgt_reps = model.extract_reaction_fp(src=src_token_ids, tgt=tgt_token_ids)
+        src_reps, tgt_reps = model._reaction_fp(src=src_token_ids, tgt=tgt_token_ids)
         prod_fps.append(src_reps.detach().cpu())
         react_fps.append(tgt_reps.detach().cpu())
             

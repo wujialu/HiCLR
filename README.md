@@ -8,7 +8,7 @@ Implementation of HiCLR: a knowledge-induced hierarchical contrastive learning f
 
 ## **Contents**
 
-- [Python Dependencies](#python-dependencies)
+- [System Dependencies](#system-dependencies)
 - [Installation Guide](#installation-guide)
 - [Download resources](#download-resources)
 - [Pre-train HiCLR](#pre-train-hiclr)
@@ -17,8 +17,9 @@ Implementation of HiCLR: a knowledge-induced hierarchical contrastive learning f
     - [Fine-tuning](#fine-tuning)
 
 
-## **Python Dependencies**
-* Python (version >= 3.7) 
+## **System Dependencies**
+We implemented all experiments in a Linux platform with cuda 11.3.
+* python (version >= 3.7) 
 * pytorch (version >= 1.12.0) 
 * rdkit (version == 2023.3.2)
 * transformers (version == 4.30.2)
@@ -42,6 +43,8 @@ Unzip the data.zip and put it in the `HiCLR/data` directory.
 
 Unzip the checkpoint.zip and put it in the `HiCLR/checkpoint` directory.
 
+You can use the `data/random_10000.csv` as the demo data to run our code.
+
 ## **Pre-train HiCLR**
 
 You can directly use the pre-trained model we provided in the checkpoint folder for downstream applications.
@@ -51,6 +54,9 @@ You also can use the following script to pre-train a new model:
 ```
 bash scripts/pretrain.sh
 ```
+Multiple hyperparameters can be selected in `args_parse.py`.
+
+The trained model parameters and log.txt will automatically saved in the `checkpoints` directory.
 
 ## **Use HiCLR**
 
@@ -61,6 +67,8 @@ After pre-training, you can extract reaction fingerprints for any reaction datas
 python extract_rxn_fps.py 
 ```
 Please change the `data_dir` and `dataset_name` variables to your customized path.
+
+The dataset should has a `reactants>reagents>production` column, and the extracted finginprints will be saved in the `npz` file format.
 
 ### Fine-tuning
 

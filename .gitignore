@@ -1,4 +1,4 @@
-**data/
+data/
 **checkpoint/
 *__pycache__*
 *mig*
@@ -12,3 +12,4 @@
 core.*
 *.ipynb_checkpoints*
 *.vscode*
+!data/random_10000.csv

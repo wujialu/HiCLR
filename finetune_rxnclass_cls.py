@@ -29,7 +29,7 @@ def train(encoder, decoder, optimizer, loader, criterion):
     y_pred = []
 
     for batch in tqdm(loader, desc="Iteration"):
-        src, tgt, rt, id, _ = batch 
+        src, tgt, rt, ids, _ = batch 
         src, tgt, rt = src.to(args.device), tgt.to(args.device), rt.to(args.device)
         del batch
         torch.cuda.empty_cache()
@@ -37,7 +37,6 @@ def train(encoder, decoder, optimizer, loader, criterion):
         # get token representations
         src_reps, tgt_reps = encoder.extract_reaction_fp(src, tgt)
         
-        # reaction_fp = torch.cat([proj_src(src_reps), proj_tgt(tgt_reps)],dim=-1)
         reaction_fp = torch.cat([src_reps, tgt_reps], dim=-1)
         logits = decoder(reaction_fp)
 
@@ -69,7 +68,7 @@ def evaluate(encoder, decoder, loader, criterion):
     y_pred = []
 
     for batch in tqdm(loader, desc="Iteration"):
-        src, tgt, rt, id, _ = batch 
+        src, tgt, rt, ids, _ = batch 
         src, tgt, rt = src.to(args.device), tgt.to(args.device), rt.to(args.device)
         del batch
         torch.cuda.empty_cache()
