@@ -20,9 +20,9 @@ policy:
     hiclr:
       gpu_mode: True
       num_beams: 50
-      module_path: /data2/zhuyiheng/wjl/reaction_pcl/multistep/modelsmatter/external/modelsmatter_modelzoo/external_models/HiCLR/
-      model_path: /data2/zhuyiheng/wjl/reaction_pcl/multistep/modelsmatter/experiments/models/uspto50k_models/HiCLR/model_44000_augment.pt
-      vocab_path: /data2/zhuyiheng/wjl/reaction_pcl/multistep/modelsmatter/external/modelsmatter_modelzoo/external_models/HiCLR/vocab_share.pk
+      module_path: /<PATH>/modelsmatter/external/modelsmatter_modelzoo/external_models/HiCLR/
+      model_path: /<PATH>/modelsmatter/experiments/models/uspto50k_models/HiCLR/model_44000_augment.pt
+      vocab_path: /<PATH>/modelsmatter/external/modelsmatter_modelzoo/external_models/HiCLR/vocab_share.pk
 stock:
   files:
-    zinc: ~/wjl/reaction_pcl/multistep/modelsmatter/experiments/data/paroutes_stock.hdf5
+    zinc: /<PATH>/modelsmatter/experiments/data/paroutes_stock.hdf5

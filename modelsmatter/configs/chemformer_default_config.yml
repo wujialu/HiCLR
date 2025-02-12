@@ -19,10 +19,10 @@ policy:
   smiles-based:
     chemformer:
       gpu_mode: True
-      module_path: /data2/zhuyiheng/wjl/reaction_pcl/multistep/modelsmatter/external/modelsmatter_modelzoo/external_models/Chemformer/
-      # model_path: /data2/zhuyiheng/wjl/reaction_pcl/multistep/modelsmatter/experiments/models/uspto50k_models/Chemformer/uspto50kMS.ckpt 
-      model_path: /data2/zhuyiheng/wjl/reaction_pcl/multistep/modelsmatter/experiments/models/paroutes_models/Chemformer/paroutes.ckpt
-      vocab_path: /data2/zhuyiheng/wjl/reaction_pcl/multistep/modelsmatter/external/modelsmatter_modelzoo/external_models/Chemformer/bart_vocab.txt
+      module_path: /<PATH>/modelsmatter/external/modelsmatter_modelzoo/external_models/Chemformer/
+      # model_path: /<PATH>/modelsmatter/experiments/models/uspto50k_models/Chemformer/uspto50kMS.ckpt 
+      model_path: /<PATH>/modelsmatter/experiments/models/paroutes_models/Chemformer/paroutes.ckpt
+      vocab_path: /<PATH>/modelsmatter/external/modelsmatter_modelzoo/external_models/Chemformer/bart_vocab.txt
 stock:
   files:
-    zinc: /data2/zhuyiheng/wjl/reaction_pcl/multistep/modelsmatter/experiments/data/paroutes_stock.hdf5
+    zinc: /<PATH>/modelsmatter/experiments/data/paroutes_stock.hdf5

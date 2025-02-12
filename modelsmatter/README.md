@@ -50,3 +50,16 @@ Utilize the extended functionalities of AiZynthFinder through Models Matter for 
 ## Datasets & Models
 
 Datasets and models that are not proprietary are available in the [Models Matter figshare repository](https://figshare.com/s/2eab4132b322229c1efc).
+
+
+## Running multistep retrosynthesis planning using Chemformer and HiCLR
+Please download the pretrained checkpoints and specify the `model_path` parameter in `modelsmatter/configs/chemformer_default_config.yml` and `modelsmatter/configs/hiclr_default_config.yml`.
+
+Then, you can use the bash scripts to run the multistep framework.
+```
+# for Chemformer
+bash run_aizynthfinder_chemformer.sh
+# for HiCLR
+bash run_aizynthfinder_hiclr.sh
+```
+We have provided the randomly selected 100 products in the paroutes_n1 and caspyrus10k datasets in the `modelsmatter/experiments/data` directory for result reproduction.
